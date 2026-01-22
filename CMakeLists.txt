@@ -1,3 +1,5 @@
+cmake_policy(SET CMP0091 OLD)
+
 cmake_minimum_required(VERSION 3.22)
 # ===== Build variant selection =====
 #   OpenPixelOSD      -> base OSD (no VTX drivers)
@@ -118,13 +120,42 @@ else()
 endif()
 
 if(BUILD_VARIANT STREQUAL "VTX")
-    message(STATUS "Building with VTX support")
+    message(STATUS "Building generic target with VTX support")
     set(BUILD_NAME "_VTX")
     add_compile_definitions(BUILD_VARIANT_VTX)
-    set(VTX_SRC
+    add_compile_definitions(TARGET_GENERIC)
+    set(VARIANT_SRC
             ./src/rtc6705.c
             ./src/rf_pa.c
-            ./src/vtx_msp.c)
+            ./src/vtx_msp.c
+            ./src/settingsMenu.c
+            ./src/targets/generic.c)
+elseif(BUILD_VARIANT STREQUAL "PIXELVTX")
+    message(STATUS "Building pixelVTX")
+    set(BUILD_NAME "_pixelVTX")
+    add_compile_definitions(BUILD_VARIANT_VTX)
+    add_compile_definitions(TARGET_PIXELVTX)
+    set(VARIANT_SRC
+            ./src/rtc6705.c
+            ./src/rf_pa.c
+            ./src/vtx_msp.c
+            ./src/settingsMenu.c
+            ./src/targets/pixelVTX.c)
+elseif(BUILD_VARIANT STREQUAL "PIXELVTX_COLOR")
+    message(STATUS "Building pixelVTXcolor")
+    set(BUILD_NAME "_pixelVTXcolor")
+    add_compile_definitions(BUILD_VARIANT_VTX)
+    add_compile_definitions(TARGET_PIXELVTX_COLOR)
+    set(VARIANT_SRC
+            ./src/rtc6705.c
+            ./src/rf_pa.c
+            ./src/vtx_msp.c
+            ./src/settingsMenu.c
+            ./src/targets/pixelVTX.c)
+else()
+  message(STATUS "Building generic target")
+  set(VARIANT_SRC
+            ./src/targets/generic.c)
 endif()
 
 add_compile_definitions(
@@ -143,7 +174,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         ${STARTUP_ASSEMBLY_FILE}
         ${SOURCE}
-        ${VTX_SRC}
+        ${VARIANT_SRC}
         ./src/stm32g4xx/stm32g4xx_it.c
         ./src/stm32g4xx/system_stm32g4xx.c
         ./src/stm32g4xx/sysmem.c
@@ -159,18 +190,22 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         ./src/comp.c
         ./src/uart.c
         ./src/usb.c
+        ./src/flash.c
         ./src/video_gen.c
         ./src/video_overlay.c
         ./src/canvas_char.c
         ./src/msp_displayport.c
+        ./src/msp_fc.c
         ./src/fonts/update_font.c
         ./src/video_graphics.c
         ./src/main.c
+        ./src/settings.c
 
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+        ./src/targets
         ./src/stm32g4xx
         ./src/msp
         ./src

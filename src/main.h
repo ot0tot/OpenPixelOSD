@@ -17,9 +17,11 @@
 #include "stm32g4xx_ll_pwr.h"
 #include "stm32g4xx_ll_spi.h"
 #include "stm32g4xx_ll_tim.h"
+#include "stm32g4xx_ll_hrtim.h"
 #include "stm32g4xx_ll_usart.h"
 #include "stm32g4xx_ll_gpio.h"
 #include "stm32g4xx_ll_adc.h"
+#include "trace.h"
 
 #ifndef GIT_TAG
 #define GIT_TAG "-.-.-"
@@ -38,11 +40,35 @@
 #define MCU_TYPE "---------"
 #endif /* MCU_TYPE */
 
+#define ROW_SIZE                                16
+#define COLUMN_SIZE                             41
+
+#define VISUAL_PICTURE_LINE_NS                  50000
+#define LINE_CENTER_NS                          31400
+
+#define NS_TO_TICKS(ns)                         (((ns) * 170UL) / 1000UL)
+#define VISUAL_PICTURE_LINE_TICKS_MAX           (NS_TO_TICKS(VISUAL_PICTURE_LINE_NS))
+#define PIXELS_PER_LINE                         (COLUMN_SIZE * 12)
+#define TIM1_AUTORELOAD                         ((uint32_t)(VISUAL_PICTURE_LINE_TICKS_MAX / PIXELS_PER_LINE) - 1)
+#define VISUAL_PICTURE_LINE_TICKS               ((TIM1_AUTORELOAD + 1) * PIXELS_PER_LINE)
+#define LINE_START_DELAY                        (NS_TO_TICKS(LINE_CENTER_NS) - (VISUAL_PICTURE_LINE_TICKS) / 2)
+
+
+
+#define BLACK_LEVEL_ADC_DELAY_NS                3300
+#define LOW_SYNC_ADC_DELAY_NS                   6000
+#define COLOR_BURST_SYNC_GATE_CLOSE_NS          2100
+#define VISIBLE_LINE_END_NS                     57000
+
 typedef enum {
   PX_BLACK = 0,
   PX_TRANSPARENT,
   PX_WHITE,
-  PX_GRAY
+  PX_GRAY,
+  PX_GREEN,
+  PX_RED,
+  PX_BLUE,
+  PX_YELLOW
 } px_t;
 
 // see adc.c - adc_init()
@@ -54,93 +80,77 @@ typedef enum {
   ADC_CH_COUNT
 } adc_ch_t;
 
-#define LED_STATE_Pin LL_GPIO_PIN_6
-#define LED_STATE_GPIO_Port GPIOC
 
-//
-// Video detection/generation/overlay
-//
-#define COMP3_INP_VIDEO_IN_Pin LL_GPIO_PIN_0
-#define COMP3_INP_VIDEO_IN_GPIO_Port GPIOA
-#define OPAMP1_VINPIO0_GRAY_COLOR_Pin LL_GPIO_PIN_1
-#define OPAMP1_VINPIO0_GRAY_COLOR_GPIO_Port GPIOA
-#define OPAMP1_VOUT_VIDEO_OUT_Pin LL_GPIO_PIN_2
-#define OPAMP1_VOUT_VIDEO_OUT_GPIO_Port GPIOA
-#define OPAMP1_VINPIO0_VIDEO_GEN_IN_Pin LL_GPIO_PIN_3
-#define OPAMP1_VINPIO0_VIDEO_GEN_IN_GPIO_Port GPIOA
-#define OPAMP1_VINPIO2_VIDEO_IN_Pin LL_GPIO_PIN_7
-#define OPAMP1_VINPIO2_VIDEO_IN_GPIO_Port GPIOA
-#define TIM17_CH1_VIDEO_GEN_OUT_Pin LL_GPIO_PIN_5
-#define TIM17_CH1_VIDEO_GEN_OUT_GPIO_Port GPIOB
-#define COMP3_OUT_SYNC_EXT_TRIGGER_Pin LL_GPIO_PIN_7
-#define COMP3_OUT_SYNC_EXT_TRIGGER_GPIO_Port GPIOB
+#define OPAMP1_VOUT_VIDEO_OUT_Pin               LL_GPIO_PIN_2
+#define OPAMP1_VOUT_VIDEO_OUT_GPIO_Port         GPIOA
 
-//
-// VTX + PA support
-//
+#define OPAMP1_VINPIO0_VIDEO2_IN_Pin            LL_GPIO_PIN_3
+#define OPAMP1_VINPIO0_VIDEO2_IN_GPIO_Port      GPIOA
 
-// RTC6705 is driven by software, but using the same pins that would be used if it was driven in hardware.
-// If an SPI based RTC6705 replacement is available in the future, fewer changes would have to be made in both hardware
-// designs and software to accomodate this.
-//
-// For an RTC6705, when using hardware SPI MISO and MOSI can be connected to each other via a 330R resistor,
-// and then MISO is connected to the RTC6705's SPIDATA signal, in this configuration either hardware or software
-// can be used, clocking out 32 bits instead of the usual 25.
-//
-// Currently the code uses bitbanged IO to the RTC6705, using SPI2_MOSI/CLK/CS, see rtc6705.c defines.
-#define SPI2_CS_Pin LL_GPIO_PIN_12
-#define SPI2_CS_GPIO_Port GPIOB
-#define SPI2_SCK_Pin LL_GPIO_PIN_13
-#define SPI2_SCK_GPIO_Port GPIOB
-#define SPI2_MISO_Pin LL_GPIO_PIN_14
-#define SPI2_MISO_GPIO_Port GPIOB
-#define SPI2_MOSI_Pin LL_GPIO_PIN_15
-#define SPI2_MOSI_GPIO_Port GPIOB
-
-#define ADC_RESERVED_Pin LL_GPIO_PIN_1
-#define ADC_RESERVED_GPIO_Port GPIOB
-#define ADC_RESERVED_Channel LL_ADC_CHANNEL_12
-#define ADC_PA_VDET_Pin LL_GPIO_PIN_11
-#define ADC_PA_VDET_GPIO_Port GPIOB
-#define ADC_PA_VDET_Channel LL_ADC_CHANNEL_14
+#define OPAMP1_VINPIO2_VIDEO1_IN_Pin            LL_GPIO_PIN_7
+#define OPAMP1_VINPIO2_VIDEO1_IN_GPIO_Port      GPIOA
 
 //
 // Reserved pins for future features
 //
 
 // If RGB LED support is added, then TIM8 has required features for driving by DMA.
-#define RGBLED_TIM8_CH1_Pin LL_GPIO_PIN_15
-#define RGBLED_TIM8_CH1_GPIO_Port GPIOA
+#define RGBLED_TIM8_CH1_Pin                     LL_GPIO_PIN_15
+#define RGBLED_TIM8_CH1_GPIO_Port               GPIOA
 
 // If FRSKY PixelOSD protocol is added, a second UART can be used.
-#define FRSKY_PIXEL_OSD_TX_USART3_TX_Pin LL_GPIO_PIN_10
-#define FRSKY_PIXEL_OSD_TX_USART3_TX_GPIO_Port GPIOC
-#define FRSKY_PIXEL_OSD_RX_USART3_RX_Pin LL_GPIO_PIN_11
-#define FRSKY_PIXEL_OSD_RX_USART3_RX_GPIO_Port GPIOC
+#define FRSKY_PIXEL_OSD_TX_USART3_TX_Pin        LL_GPIO_PIN_10
+#define FRSKY_PIXEL_OSD_TX_USART3_TX_GPIO_Port  GPIOC
+#define FRSKY_PIXEL_OSD_RX_USART3_RX_Pin        LL_GPIO_PIN_11
+#define FRSKY_PIXEL_OSD_RX_USART3_RX_GPIO_Port  GPIOC
 
 // If RF PA VBIAS is expanded, then DAC1_OUT1 can be used to control the VBIAS voltage.
-#define RF_VBIAS_DAC1_OUT2_Pin LL_GPIO_PIN_5
-#define RF_VBIAS_DAC1_OUT2_GPIO_Port GPIOA
-
-// USER_KEY only used in GPIO init code, currently only used by developers.
-#define USER_KEY_Pin LL_GPIO_PIN_13
-#define USER_KEY_GPIO_Port GPIOC
-// BOOT_KEY only used in GPIO init code, currently only used by developers.
-#define BOOT_KEY_Pin LL_GPIO_PIN_8
-#define BOOT_KEY_GPIO_Port GPIOB
+#define RF_VBIAS_DAC1_OUT2_Pin                  LL_GPIO_PIN_5
+#define RF_VBIAS_DAC1_OUT2_GPIO_Port            GPIOA
 
 
-#define EXEC_RAM __attribute__((section (".ccmram.text"), optimize("Ofast"))) /* exec functions from CCMRAM */
-#define CCMRAM_DATA __attribute__((section (".ccmram.data"))) /* initialized var */
-#define CCMRAM_BSS __attribute__((section (".ccmram.bss"))) /* uninitialized var */
+#define EXEC_RAM      __attribute__((section (".ccmram.text"), optimize("Ofast"))) /* exec functions from CCMRAM */
+#define CCMRAM_DATA   __attribute__((section (".ccmram.data"))) /* initialized var */
+#define CCMRAM_BSS    __attribute__((section (".ccmram.bss"))) /* uninitialized var */
 
-#define DAC12BIT_TO_MV(value)      (((uint32_t)(value) * 3300) / 4095)
-#define DAC12BIT_FROM_MV(mV)       (((uint32_t)(mV) * 4095) / 3300)
+#define DAC12BIT_TO_MV(value)                   (((uint32_t)(value) * 3300) / 4095)
+#define DAC12BIT_FROM_MV(mV)                    (((uint32_t)(mV) * 4095) / 3300)
 
-#define DAC8BIT_TO_MV(value)      (((uint32_t)(value) * 3300) / 255)
-#define DAC8BIT_FROM_MV(mV)       (((uint32_t)(mV) * 255) / 3300)
+#define DAC8BIT_TO_MV(value)                    (((uint32_t)(value) * 3300) / 255)
+#define DAC8BIT_FROM_MV(mV)                     (((uint32_t)(mV) * 255) / 3300)
 
-#define VIDE_DETECTION_MV       (DAC12BIT_TO_MV(250)) // 250 mV for video detection
+#define SYNC_START_MV                           300
+#define SYNC_SCAN_MIN_MV                        25
+#define SYNC_SCAN_MAX_MV                        800
+#define SYNC_SCAN_INC_MV                        25
+
+#define SYNC_LOST_FRAMES_THRESHOLD              20
+
+#define BOXID_CAM_SWITCH                        MSP_BOXID_CAMERA_CONTROL_1
+
+
+#if defined(TARGET_PIXELVTX)
+#include "targets\pixelVTX.h"
+#elif defined(TARGET_PIXELVTX_COLOR)
+#include "targets\pixelVTXcolor.h"
+#else
+#include "targets\generic.h"
+#endif
+
+
+#if defined(STM32G474xx) && defined(USE_COLOR) && USE_COLOR == 1 
+#define IF_USE_COLOR(arg)        arg
+#undef  COLUMN_SIZE
+#define COLUMN_SIZE              30
+#else
+#define IF_USE_COLOR(...)        { }
+#undef  USE_COLOR
+#define USE_COLOR                0
+#endif
+
+#ifndef MAX
+#define MAX(a, b)  (((a) > (b)) ? (a) : (b))
+#endif
 
 void gpio_init(void);
 void adc_init(void);
@@ -148,6 +158,7 @@ uint16_t adc_read_raw(adc_ch_t ch);
 uint16_t adc_read_mv(adc_ch_t ch);
 uint32_t adc_read_vdda_mv(void);
 float adc_read_mcu_temp_c(void);
+uint16_t adc_read_black_level(void);
 
 void DAC1_Init(void);
 void DAC3_Init(void);
@@ -159,12 +170,13 @@ void OPAMP1_Init(void);
 void TIM1_Init(void);
 void TIM2_Init(void);
 void TIM3_Init(void);
-void TIM4_Init(void);
 void TIM7_Init(void);
+void TIM15_Init(void);
 void TIM17_Init(void);
+void HRTIM1_Init(void);
 
+void COMP2_Init(void);
 void COMP3_Init(void);
-void COMP4_Init(void);
 
 /* Canvas character functions */
 EXEC_RAM void canvas_char_clean(void);
